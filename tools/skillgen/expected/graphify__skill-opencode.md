@@ -112,8 +112,11 @@ import json
 from graphify.detect import detect
 from pathlib import Path
 result = detect(Path('INPUT_PATH'))
-print(json.dumps(result, ensure_ascii=False))
-" > graphify-out/.graphify_detect.json
+# Write the sidecar from Python, not a shell redirect, so the same block renders
+# on PowerShell hosts without console-encoding drift (#2528).
+Path('graphify-out/.graphify_detect.json').write_text(json.dumps(result, ensure_ascii=False), encoding=\"utf-8\")
+print(f'Detected {result[\"total_files\"]} files')
+"
 ```
 
 Replace INPUT_PATH with the actual path the user provided. Do NOT cat or print the JSON - read it silently and present a clean summary instead:
@@ -151,14 +154,14 @@ Skip this step entirely if `detect` returned zero `video` files. When the corpus
 
 This step has two parts: **structural extraction** (deterministic, free) and **semantic extraction** (LLM, costs tokens).
 
-> **graphify needs no API key. Never ask the user for one, and never block on one.** Code is extracted structurally (AST) with no LLM and no key at all — a code-only corpus (the common `/graphify .` on a repo) skips semantic extraction entirely, so it needs nothing here: go straight to Part A and skip Part B. Semantic extraction (only for docs, papers, and images) uses Gemini **only if** `GEMINI_API_KEY`/`GOOGLE_API_KEY` is already set; otherwise the host agent itself is the LLM. graphify does **not** read `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or any other provider key. If you catch yourself about to prompt for, wait on, or stop because of a missing API key, that is a misread of this skill — proceed without one.
+> **graphify needs no API key. Never ask the user for one, and never block on one.** Code is extracted structurally (AST) with no LLM and no key at all — a code-only corpus (the common `/graphify .` on a repo) skips semantic extraction entirely, so it needs nothing here: go straight to Part A and skip Part B. Semantic extraction (only for docs, papers, and images) uses Gemini through OpenRouter **only if** `GRAPHIFY_OPENROUTER_API_KEY` is already set; otherwise the host agent itself is the LLM. If you catch yourself about to prompt for, wait on, or stop because of a missing API key, that is a misread of this skill — proceed without one.
 
-**Before semantic extraction:** check whether `GEMINI_API_KEY` or `GOOGLE_API_KEY` is set. If neither is set, print this one-liner to the user:
-> Tip: set `GEMINI_API_KEY` or `GOOGLE_API_KEY` to use Gemini for semantic extraction (`pip install 'graphifyy[gemini]'`).
+**Before semantic extraction:** check whether `GRAPHIFY_OPENROUTER_API_KEY` is set. If it is not set, print this one-liner to the user:
+> Tip: set `GRAPHIFY_OPENROUTER_API_KEY` to use Gemini through OpenRouter for semantic extraction (`pip install 'graphifyy[gemini]'`).
 
-Print it once, then continue — do not wait for the user to supply a key. If `GEMINI_API_KEY` or `GOOGLE_API_KEY` IS set, use `graphify.llm.extract_corpus_parallel(files, backend="gemini")` for semantic extraction instead of dispatching subagents. The default Gemini model is `gemini-3-flash-preview`; set `GRAPHIFY_GEMINI_MODEL` or pass `--model` in headless CLI flows to override it.
+Print it once, then continue — do not wait for the user to supply a key. If `GRAPHIFY_OPENROUTER_API_KEY` IS set, use `graphify.llm.extract_corpus_parallel(files, backend="gemini")` for semantic extraction instead of dispatching subagents. The exact default Gemini model is `gemini-3-flash-preview` (sent as `google/gemini-3-flash-preview`, OpenRouter's required namespace); set `GRAPHIFY_GEMINI_MODEL` or pass `--model` in headless CLI flows to override it without substitution.
 
-> **No other API keys are read.** When `GEMINI_API_KEY`/`GOOGLE_API_KEY` are unset, semantic extraction falls to the host agent itself — the running session is the LLM. On a host that dispatches subagents (e.g. Claude Code), dispatch them as written in Part B. On a host that runs the CLI directly in a terminal and cannot dispatch subagents, do not stall: a code-only corpus has no semantic work, so write the empty semantic file (Part B "Fast path") and continue to Part C; for a corpus with docs/papers/images, either set a Gemini key or extract those inline yourself, but in no case prompt for `ANTHROPIC_API_KEY` — that prompt is a misread of this skill.
+> **No other API keys are read by this skill.** When the OpenRouter key is unset, semantic extraction falls to the host agent itself — the running session is the LLM. On a host that dispatches subagents (e.g. Claude Code), dispatch them as written in Part B. On a host that runs the CLI directly in a terminal and cannot dispatch subagents, do not stall: a code-only corpus has no semantic work, so write the empty semantic file (Part B "Fast path") and continue to Part C; for a corpus with docs/papers/images, either set the OpenRouter key or extract those inline yourself, but in no case prompt for another provider key.
 
 **Run Part A (AST) and Part B (semantic) in parallel. Dispatch all semantic subagents AND start AST extraction in the same message. Both can run simultaneously since they operate on different file types. Merge results in Part C as before.**
 
@@ -481,6 +484,7 @@ from graphify.build import build_from_json
 from graphify.cluster import score_all
 from graphify.analyze import god_nodes, surprising_connections, suggest_questions
 from graphify.report import generate
+from graphify.export import to_json
 from pathlib import Path
 
 extraction = json.loads(Path('graphify-out/.graphify_extract.json').read_text(encoding=\"utf-8\"))
@@ -502,6 +506,13 @@ questions = suggest_questions(G, communities, labels)
 report = generate(G, communities, cohesion, labels, analysis['gods'], analysis['surprises'], detection, tokens, 'INPUT_PATH', suggested_questions=questions)
 Path('graphify-out/GRAPH_REPORT.md').write_text(report, encoding=\"utf-8\")
 Path('graphify-out/.graphify_labels.json').write_text(json.dumps({str(k): v for k, v in labels.items()}, ensure_ascii=False), encoding=\"utf-8\")
+# Re-export so graph.json nodes carry the curated community_name (#2490).
+# Same extraction as Step 4, so the #479 shrink-guard passes on node count;
+# if it still refuses, surface the guard message - do not force past it.
+wrote = to_json(G, communities, 'graphify-out/graph.json', community_labels=labels)
+if not wrote:
+    print('ERROR: refused to shrink graphify-out/graph.json (existing graph has more nodes; #479).')
+    print('If this shrink is intentional (you deleted files), re-run a full build with --force.')
 print('Report updated with community labels')
 "
 ```
